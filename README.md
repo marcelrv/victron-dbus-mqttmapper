@@ -102,7 +102,7 @@ This way, MQTT data from existing devices can easily be mapped to a Victron devi
             "digits": 3
         },
     ]}
-    ```
+```
 
 
 ## Screenshot of result
