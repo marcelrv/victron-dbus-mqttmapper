@@ -1,0 +1,9 @@
+version: "3.8"
+services:
+  p1-reader:
+    build: .
+    image: victron-mqtt-mapper
+    env_file:
+    - .env
+    restart: unless-stopped
+    container_name: victron-mqtt-mapper
