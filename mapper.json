@@ -205,7 +205,6 @@
             "valueType": "string",
             "description": "Equipment Id",
             "path": "/Serial"
-
         }
     ]
 }

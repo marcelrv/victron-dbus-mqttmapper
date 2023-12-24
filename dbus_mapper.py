@@ -49,7 +49,7 @@ class P1Mapper:
         self.setup_mqtt_victron()
         self.setup_mqtt_p1()
         self.index = 0
-        self.mqtt_client_victron.loop()
+        self.mqtt_client_victron.loop_start()
         self.mqtt_client_p1.loop_forever()
 
     def setup_mqtt_p1(self):
@@ -65,7 +65,11 @@ class P1Mapper:
         self.mqtt_client_victron = mqtt.Client(userdata=None)
         self.mqtt_client_victron.on_connect = self.on_connect_victron
         self.mqtt_client_victron.on_disconnect = self.on_disconnect_victron
-        self.mqtt_client_victron.connect(VICTRON_BROKER, 1883, 60)
+        self.mqtt_client_victron.connect_async(
+            VICTRON_BROKER,
+            1883,
+            keepalive=30,
+        )
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -80,16 +84,22 @@ class P1Mapper:
         if rc == 0:
             self.logger.info("Victron MQTT broker Connection Established")
         else:
-            self.logger.warning(f"Victron MQTT broker bad connection Returned code={rc}")
+            self.logger.warning(
+                f"Victron MQTT broker bad connection Returned code={rc}"
+            )
 
     def on_disconnect(self, client, userdata, rc):
         if rc != 0:
-            self.logger.warning("Unexpected source MQTT disconnection. Will auto-reconnect")
+            self.logger.warning(
+                "Unexpected source MQTT disconnection. Will auto-reconnect"
+            )
             self.connected = 0
 
     def on_disconnect_victron(self, client, userdata, rc):
         if rc != 0:
-            self.logger.warning("Unexpected Victron MQTT disconnection. Will auto-reconnect")
+            self.logger.warning(
+                "Unexpected Victron MQTT disconnection. Will auto-reconnect"
+            )
 
     def on_message(self, client, userdata, message):
         self.logger.debug(f"Message topic: {message.topic}")
@@ -120,7 +130,7 @@ class P1Mapper:
                 if "digits" in field:
                     dbus_record["digits"] = field["digits"]
                 dbus_data.append(dbus_record)
-                
+
         # Add connected depending on the source mqqt connection and update index to ensure that the dbus service is updated
         dbus_data.append(
             {
@@ -138,16 +148,18 @@ class P1Mapper:
                 "writeable": False,
             }
         )
-        self.index += 1
         response["dbus_data"].extend(dbus_data)
         response_str = json.dumps(response, indent=4)
         if self.index % 256 == 0:
             self.logger.info(f"Published message # {self.index}")
-        if self.index == 0: # Always print the first message
+        if self.index == 0:  # Always print the first message
             self.logger.info(f"Published message: {response_str}")
         else:
             self.logger.debug(f"Published message: {response_str}")
-        self.mqtt_client_victron.publish("W/dbus-mqtt-services", response_str)
+        rc = self.mqtt_client_victron.publish("W/dbus-mqtt-services", response_str)
+        if rc[0] != 0:
+            self.logger.warning(f"Error message # {self.index} during publish: {rc}")
+        self.index += 1
 
 
 if __name__ == "__main__":
