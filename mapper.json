@@ -56,7 +56,7 @@
     },
     "dbus_fields": [
         {
-            "name": "PowerSumActual",
+            "name": "PowerNetActual",
             "unit": "W",
             "valueType": "float",
             "description": "Actual electricity power imported - power exported in 1 Watt resolution",

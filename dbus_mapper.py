@@ -4,8 +4,14 @@ import copy
 import json
 import logging
 import os
+from datetime import datetime
 
 import paho.mqtt.client as mqtt
+
+__author__ = ["Marcel Verpaalen"]
+__version__ = "1.0"
+__copyright__ = "Copyright 2023, Marcel Verpaalen"
+__license__ = "GPL"
 
 # from dotenv import load_dotenv
 
@@ -20,6 +26,7 @@ VICTRON_BROKER = "192.168.3.77"
 SOURCE_MQTT_BROKER = "192.168.3.17"
 MQTT_TOPIC = "/energy/meter"
 LOG_LEVEL = "INFO"
+WILL_TOPIC = "/energy/status_dbus_mapper"
 
 
 class P1Mapper:
@@ -30,7 +37,7 @@ class P1Mapper:
     This can be picked up by the dbus-mqtt-services.py (https://github.com/marcelrv/dbus-mqtt-services) script and published to the Victron D-Bus.
 
     """
-       
+
     connected = 0
 
     def __init__(self):
@@ -39,11 +46,7 @@ class P1Mapper:
         self.logger.info(f"Source MQTT broker {VICTRON_BROKER}")
         self.logger.info(f"Vicron MQTT broker {SOURCE_MQTT_BROKER}")
 
-        dataload = json.load(
-            open(
-                os.path.join(os.path.dirname(__file__), "mapper.json"), encoding="utf-8"
-            )
-        )
+        dataload = json.load(open(os.path.join(os.path.dirname(__file__), "mapper.json"), encoding="utf-8"))
         self.device = dataload["device"]
         self.mapping: list = dataload["dbus_fields"]
         self.setup_mqtt_victron()
@@ -59,6 +62,7 @@ class P1Mapper:
         self.mqtt_client_p1.on_message = self.on_message
         self.mqtt_client_p1.on_disconnect = self.on_disconnect
         self.mqtt_client_p1.connect(SOURCE_MQTT_BROKER, 1883, 60)
+        self.mqtt_client_p1.publish(WILL_TOPIC, "Dbus mapper Disconnected")
 
     def setup_mqtt_victron(self):
         self.logger.info(f"Setting up MQTT broker connection to {VICTRON_BROKER}")
@@ -79,27 +83,26 @@ class P1Mapper:
             self.logger.warning(f"Source MQTT broker bad connection Returned code={rc}")
             self.connected = 0
         client.subscribe(MQTT_TOPIC)
+        client.publish(
+            WILL_TOPIC,
+            f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}",
+            retain=True,
+        )
 
     def on_connect_victron(self, client, userdata, flags, rc):
         if rc == 0:
             self.logger.info("Victron MQTT broker Connection Established")
         else:
-            self.logger.warning(
-                f"Victron MQTT broker bad connection Returned code={rc}"
-            )
+            self.logger.warning(f"Victron MQTT broker bad connection Returned code={rc}")
 
     def on_disconnect(self, client, userdata, rc):
         if rc != 0:
-            self.logger.warning(
-                "Unexpected source MQTT disconnection. Will auto-reconnect"
-            )
+            self.logger.warning("Unexpected source MQTT disconnection. Will auto-reconnect")
             self.connected = 0
 
     def on_disconnect_victron(self, client, userdata, rc):
         if rc != 0:
-            self.logger.warning(
-                "Unexpected Victron MQTT disconnection. Will auto-reconnect"
-            )
+            self.logger.warning("Unexpected Victron MQTT disconnection. Will auto-reconnect")
 
     def on_message(self, client, userdata, message):
         self.logger.debug(f"Message topic: {message.topic}")
@@ -152,8 +155,18 @@ class P1Mapper:
         response_str = json.dumps(response, indent=4)
         if self.index % 256 == 0:
             self.logger.info(f"Published message # {self.index}")
+            self.mqtt_client_p1.publish(
+                WILL_TOPIC,
+                f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
+                retain=True,
+            )
         if self.index == 0:  # Always print the first message
             self.logger.info(f"Published message: {response_str}")
+            self.mqtt_client_p1.publish(
+                WILL_TOPIC,
+                f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
+                retain=True,
+            )
         else:
             self.logger.debug(f"Published message: {response_str}")
         rc = self.mqtt_client_victron.publish("W/dbus-mqtt-services", response_str)
