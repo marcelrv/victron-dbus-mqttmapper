@@ -20,7 +20,7 @@ FROM python:3.11-alpine
 #      poetry install \
 #      && apk del .build-deps gcc musl-dev
 
-RUN pip install paho-mqtt
+RUN pip install paho-mqtt==1.6.1
 
 COPY *.py *.json ./
 CMD ["python", "-u", "dbus_mapper.py"]

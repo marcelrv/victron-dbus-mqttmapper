@@ -9,11 +9,13 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 
 __author__ = ["Marcel Verpaalen"]
-__version__ = "1.0"
+__version__ = "1.1"
 __copyright__ = "Copyright 2023, Marcel Verpaalen"
 __license__ = "GPL"
 
+#  v1.1  add will message to mqtt broker
 # from dotenv import load_dotenv
+
 
 # load_dotenv()
 logging.basicConfig(
@@ -27,6 +29,7 @@ SOURCE_MQTT_BROKER = "192.168.3.17"
 MQTT_TOPIC = "/energy/meter"
 LOG_LEVEL = "INFO"
 WILL_TOPIC = "/energy/status_dbus_mapper"
+VICTRON_TOPIC = "W/dbus-mqtt-services"
 
 
 class P1Mapper:
@@ -61,14 +64,24 @@ class P1Mapper:
         self.mqtt_client_p1.on_connect = self.on_connect
         self.mqtt_client_p1.on_message = self.on_message
         self.mqtt_client_p1.on_disconnect = self.on_disconnect
+        self.mqtt_client_p1.will_set(WILL_TOPIC, "Dbus mapper offline", retain=True)
         self.mqtt_client_p1.connect(SOURCE_MQTT_BROKER, 1883, 60)
-        self.mqtt_client_p1.publish(WILL_TOPIC, "Dbus mapper Disconnected")
 
     def setup_mqtt_victron(self):
         self.logger.info(f"Setting up MQTT broker connection to {VICTRON_BROKER}")
         self.mqtt_client_victron = mqtt.Client(userdata=None)
         self.mqtt_client_victron.on_connect = self.on_connect_victron
         self.mqtt_client_victron.on_disconnect = self.on_disconnect_victron
+        will = copy.deepcopy(self.device)
+        will["dbus_data"] = [
+            {
+                "path": "/Connected",
+                "value": 0,
+                "valueType": "integer",
+                "writeable": False,
+            }
+        ]
+        self.mqtt_client_victron.will_set(VICTRON_TOPIC, json.dumps(will), retain=True)
         self.mqtt_client_victron.connect_async(
             VICTRON_BROKER,
             1883,
@@ -85,7 +98,7 @@ class P1Mapper:
         client.subscribe(MQTT_TOPIC)
         client.publish(
             WILL_TOPIC,
-            f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}",
+            f"Dbus mapper online {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}",
             retain=True,
         )
 
@@ -157,19 +170,19 @@ class P1Mapper:
             self.logger.info(f"Published message # {self.index}")
             self.mqtt_client_p1.publish(
                 WILL_TOPIC,
-                f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
+                f"Dbus mapper online {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
                 retain=True,
             )
         if self.index == 0:  # Always print the first message
             self.logger.info(f"Published message: {response_str}")
             self.mqtt_client_p1.publish(
                 WILL_TOPIC,
-                f"Dbus mapper Connected {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
+                f"Dbus mapper online {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}. Published message # {self.index}",
                 retain=True,
             )
         else:
             self.logger.debug(f"Published message: {response_str}")
-        rc = self.mqtt_client_victron.publish("W/dbus-mqtt-services", response_str)
+        rc = self.mqtt_client_victron.publish(VICTRON_TOPIC, response_str)
         if rc[0] != 0:
             self.logger.warning(f"Error message # {self.index} during publish: {rc}")
         self.index += 1
