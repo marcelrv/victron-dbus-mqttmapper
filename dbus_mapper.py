@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
+import asyncio
 
 __author__ = ["Marcel Verpaalen"]
 __version__ = "1.1"
@@ -27,7 +28,7 @@ logging.basicConfig(
 VICTRON_BROKER = "192.168.3.77"
 SOURCE_MQTT_BROKER = "192.168.3.17"
 MQTT_TOPIC = "/energy/meter"
-LOG_LEVEL = "INFO"
+LOG_LEVEL = "DEBUG"
 WILL_TOPIC = "/energy/status_dbus_mapper"
 VICTRON_TOPIC = "/dbus-mqtt-services"
 
@@ -57,7 +58,12 @@ class P1Mapper:
         self.setup_mqtt_p1()
         self.index = 0
         self.mqtt_client_victron.loop_start()
-        self.mqtt_client_p1.loop_forever()
+        self.mqtt_client_p1.loop_start()
+#        self.mqtt_client_p1.loop_forever()
+        self.loop = asyncio.get_event_loop()
+        self.loop.run_forever()
+
+
 
     def setup_mqtt_p1(self):
         self.logger.info(f"Setting up MQTT broker connection to {SOURCE_MQTT_BROKER}")
@@ -196,6 +202,8 @@ class P1Mapper:
         rc = self.mqtt_client_victron.publish(VICTRON_TOPIC, response_str)
         if rc[0] != 0:
             self.logger.warning(f"Error message # {self.index} during publish: {rc}")
+        else:
+            self.logger.debug(f"success message # {self.index}")
         self.index += 1
 
 rc_desciptions = {
