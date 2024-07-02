@@ -29,7 +29,7 @@ SOURCE_MQTT_BROKER = "192.168.3.17"
 MQTT_TOPIC = "/energy/meter"
 LOG_LEVEL = "INFO"
 WILL_TOPIC = "/energy/status_dbus_mapper"
-VICTRON_TOPIC = "W/dbus-mqtt-services"
+VICTRON_TOPIC = "/dbus-mqtt-services"
 
 
 class P1Mapper:
