@@ -42,6 +42,7 @@ class P1Mapper:
     """
 
     connected = 0
+    message_waiting = False
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ class P1Mapper:
             f"Dbus mapper online {str(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}",
             retain=True,
         )
+        self.message_waiting = False
+
 
     def on_connect_victron(self, client, userdata, flags, rc):
         if rc == 0:
@@ -113,6 +116,7 @@ class P1Mapper:
             self.logger.warning("Unexpected source MQTT disconnection. Will auto-reconnect")
             self.logger.warning(f"Disconnection code {rc}: {rc_desciptions[rc]}")
             self.connected = 0
+            self.message_waiting = False
 
     def on_disconnect_victron(self, client, userdata, rc):
         if rc != 0:
@@ -124,7 +128,12 @@ class P1Mapper:
         self.logger.debug(f"Message content: {message.payload.decode('utf-8')}")
         if message.topic == MQTT_TOPIC:
             self.logger.debug("Message received")
-            self.mapper(message.payload.decode("utf-8"))
+            if not self.message_waiting:
+                self.message_waiting = True
+                self.mapper(message.payload.decode("utf-8"))
+                self.message_waiting = False
+            else :
+                self.logger.warning("Message skipped, previous message still being processed")
 
     def mapper(self, message):
         dbus_data = []
