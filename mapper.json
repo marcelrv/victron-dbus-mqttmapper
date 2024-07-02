@@ -51,12 +51,20 @@
                 "value": "P1 MQTT Mapper",
                 "valueType": "string",
                 "writeable": true
+            },
+            {
+                "unit": "V",
+                "value": 230,
+                "valueType": "float",
+                "path": "/Ac/L1/Voltage",
+                "digits": 0,
+                "writeable": false
             }
         ]
     },
     "dbus_fields": [
         {
-            "name": "PowerNetActual",
+            "name": "powerNetActual",
             "unit": "W",
             "valueType": "float",
             "description": "Actual electricity power imported - power exported in 1 Watt resolution",
@@ -126,7 +134,7 @@
             "path": "/Ac/L3/Current"
         },
         {
-            "name": "instantaneousActivePowerL1",
+            "name": "powerNetActual",
             "unit": "W",
             "valueType": "float",
             "description": "Instantaneous active power L1 (+P)",
@@ -147,7 +155,7 @@
             "path": "/Ac/L3/Power"
         },
         {
-            "name": "electricityImportedL1Today",
+            "name": "electricityImportedToday",
             "unit": "kWh",
             "valueType": "float",
             "description": "Imported energy meter L1",
@@ -156,7 +164,7 @@
             "digits": 3
         },
         {
-            "name": "electricityExportedL1Today",
+            "name": "electricityExportedToday",
             "unit": "kWh",
             "valueType": "float",
             "description": "Imported energy meter L1",
