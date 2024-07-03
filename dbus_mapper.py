@@ -31,7 +31,7 @@ MQTT_TOPIC = "/energy/meter"
 LOG_LEVEL = "DEBUG"
 WILL_TOPIC = "/energy/status_dbus_mapper"
 VICTRON_TOPIC = "/dbus-mqtt-services"
-
+DEBUG_LOG_MAPPING = False
 
 class P1Mapper:
     """
@@ -150,7 +150,8 @@ class P1Mapper:
         for field in self.mapping:
             if "path" in field and field["name"] in meter:
                 key = field["name"]
-                self.logger.debug(f"Field {field['name']} found in message {key}")
+                if DEBUG_LOG_MAPPING:
+                    self.logger.debug(f"Field {field['name']} found in message {key}")
                 value = meter[key]
                 if "multiplier" in field:
                     value = value * field["multiplier"]
@@ -200,7 +201,8 @@ class P1Mapper:
                 retain=True,
             )
         else:
-            self.logger.debug(f"Published message: {response_str}")
+            if DEBUG_LOG_MAPPING:
+                    self.logger.debug(f"Published message: {response_str}")
         rc = self.mqtt_client_victron.publish(VICTRON_TOPIC, response_str)
         if rc[0] != 0:
             self.logger.warning(f"Error message # {self.index} during publish: {rc}")
