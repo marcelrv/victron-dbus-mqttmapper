@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import asyncio
 import copy
 import json
 import logging
@@ -7,7 +8,6 @@ import os
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
-import asyncio
 
 __author__ = ["Marcel Verpaalen"]
 __version__ = "1.1"
@@ -43,6 +43,7 @@ class P1Mapper:
     """
 
     connected = 0
+    victron_connected = False
     message_waiting = False
 
     def __init__(self):
@@ -51,6 +52,7 @@ class P1Mapper:
         self.logger.info(f"Source MQTT broker {VICTRON_BROKER}")
         self.logger.info(f"Vicron MQTT broker {SOURCE_MQTT_BROKER}")
 
+        self.loop = asyncio.new_event_loop()
         dataload = json.load(open(os.path.join(os.path.dirname(__file__), "mapper.json"), encoding="utf-8"))
         self.device = dataload["device"]
         self.mapping: list = dataload["dbus_fields"]
@@ -59,11 +61,8 @@ class P1Mapper:
         self.index = 0
         self.mqtt_client_victron.loop_start()
         self.mqtt_client_p1.loop_start()
-#        self.mqtt_client_p1.loop_forever()
-        self.loop = asyncio.get_event_loop()
+        #        self.mqtt_client_p1.loop_forever()
         self.loop.run_forever()
-
-
 
     def setup_mqtt_p1(self):
         self.logger.info(f"Setting up MQTT broker connection to {SOURCE_MQTT_BROKER}")
@@ -110,10 +109,10 @@ class P1Mapper:
         )
         self.message_waiting = False
 
-
     def on_connect_victron(self, client, userdata, flags, rc):
         if rc == 0:
             self.logger.info("Victron MQTT broker Connection Established")
+            self.victron_connected = True
         else:
             self.logger.warning(f"Victron MQTT broker bad connection Returned code={rc}: {rc_desciptions[rc]}")
 
@@ -125,6 +124,7 @@ class P1Mapper:
             self.message_waiting = False
 
     def on_disconnect_victron(self, client, userdata, rc):
+        self.victron_connected = False
         if rc != 0:
             self.logger.warning("Unexpected Victron MQTT disconnection. Will auto-reconnect")
             self.logger.warning(f"Disconnection code {rc}: {rc_desciptions[rc]}")
@@ -134,12 +134,14 @@ class P1Mapper:
         self.logger.debug(f"Message content: {message.payload.decode('utf-8')}")
         if message.topic == MQTT_TOPIC:
             self.logger.debug("Message received")
-            if not self.message_waiting:
+            if self.victron_connected and not self.message_waiting:
                 self.message_waiting = True
                 self.mapper(message.payload.decode("utf-8"))
                 self.message_waiting = False
-            else :
-                self.logger.warning("Message skipped, previous message still being processed")
+            else:
+                self.logger.warning(
+                    f"Message skipped, {'previous message pending' if self.victron_connected else 'not connected'}."
+                )
 
     def mapper(self, message):
         dbus_data = []
@@ -205,6 +207,7 @@ class P1Mapper:
         else:
             self.logger.debug(f"success message # {self.index}")
         self.index += 1
+
 
 rc_desciptions = {
     0: "Success",
