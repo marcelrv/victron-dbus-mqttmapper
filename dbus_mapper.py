@@ -33,6 +33,7 @@ WILL_TOPIC = "/energy/status_dbus_mapper"
 VICTRON_TOPIC = "/dbus-mqtt-services"
 DEBUG_LOG_MAPPING = False
 
+
 class P1Mapper:
     """
     Class representing a P1 Mapper.
@@ -62,7 +63,10 @@ class P1Mapper:
         self.mqtt_client_victron.loop_start()
         self.mqtt_client_p1.loop_start()
         #        self.mqtt_client_p1.loop_forever()
-        self.loop.run_forever()
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
 
     def setup_mqtt_p1(self):
         self.logger.info(f"Setting up MQTT broker connection to {SOURCE_MQTT_BROKER}")
@@ -99,7 +103,9 @@ class P1Mapper:
             self.logger.info("Source broker Connection Established")
             self.connected = 1
         else:
-            self.logger.warning(f"Source MQTT broker bad connection Returned code={rc}: {rc_desciptions[rc]}")
+            self.logger.warning(
+                f"Source MQTT broker bad connection Returned code={rc}: {rc_desciptions[rc] if rc in rc_desciptions else 'Unknown'}"
+            )
             self.connected = 0
         client.subscribe(MQTT_TOPIC)
         client.publish(
@@ -114,12 +120,16 @@ class P1Mapper:
             self.logger.info("Victron MQTT broker Connection Established")
             self.victron_connected = True
         else:
-            self.logger.warning(f"Victron MQTT broker bad connection Returned code={rc}: {rc_desciptions[rc]}")
+            self.logger.warning(
+                f"Victron MQTT broker bad connection Returned code={rc}: {rc_desciptions[rc] if rc in rc_desciptions else 'Unknown'}"
+            )
 
     def on_disconnect(self, client, userdata, rc):
         if rc != 0:
             self.logger.warning("Unexpected source MQTT disconnection. Will auto-reconnect")
-            self.logger.warning(f"Disconnection code {rc}: {rc_desciptions[rc]}")
+            self.logger.warning(
+                f"Disconnection code {rc}: {rc_desciptions[rc] if rc in rc_desciptions else 'Unknown'}"
+            )
             self.connected = 0
             self.message_waiting = False
 
@@ -127,7 +137,9 @@ class P1Mapper:
         self.victron_connected = False
         if rc != 0:
             self.logger.warning("Unexpected Victron MQTT disconnection. Will auto-reconnect")
-            self.logger.warning(f"Disconnection code {rc}: {rc_desciptions[rc]}")
+            self.logger.warning(
+                f"Disconnection code {rc}: {rc_desciptions[rc] if rc in rc_desciptions else 'Unknown'}"
+            )
 
     def on_message(self, client, userdata, message):
         self.logger.debug(f"Message topic: {message.topic}")
@@ -136,7 +148,8 @@ class P1Mapper:
             self.logger.debug("Message received")
             if self.victron_connected and not self.message_waiting:
                 self.message_waiting = True
-                self.mapper(message.payload.decode("utf-8"))
+                #                self.mapper(message.payload.decode("utf-8"))
+                self.loop.call_soon(self.mapper(message.payload.decode("utf-8")), self.loop)
                 self.message_waiting = False
             else:
                 self.logger.warning(
@@ -202,7 +215,7 @@ class P1Mapper:
             )
         else:
             if DEBUG_LOG_MAPPING:
-                    self.logger.debug(f"Published message: {response_str}")
+                self.logger.debug(f"Published message: {response_str}")
         rc = self.mqtt_client_victron.publish(VICTRON_TOPIC, response_str)
         if rc[0] != 0:
             self.logger.warning(f"Error message # {self.index} during publish: {rc}")
