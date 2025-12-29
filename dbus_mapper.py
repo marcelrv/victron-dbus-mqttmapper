@@ -3,22 +3,23 @@
 import json
 import logging
 import os
-
 import signal
 import sys
-import time
 import threading
-from typing import Dict, Any
-
-
+import time
 from datetime import datetime
- 
+from typing import Any, Dict
+
 import paho.mqtt.client as mqtt
 
 __author__ = ["Marcel Verpaalen"]
-__version__ = "1.2"
+__version__ = "1.3"
 __copyright__ = "Copyright 2023-2026, Marcel Verpaalen"
 __license__ = "GPL 3.0"
+
+#  v1.1  add will message to mqtt broker
+#  v1.2  improved error handling, cross-platform support
+#  v1.3  add timeout to suspend publishing if no source messages
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -26,13 +27,15 @@ logging.basicConfig(
     level=logging.DEBUG if os.getenv("LOG_LEVEL") == "DEBUG" else logging.INFO,
 )
 
-# Configuration - Consider moving to config file or environment variables
+# Configuration
 VICTRON_BROKER = os.getenv("VICTRON_BROKER", "192.168.3.77")
 SOURCE_MQTT_BROKER = os.getenv("SOURCE_MQTT_BROKER", "192.168.3.10")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "/energy/meter")
 WILL_TOPIC = os.getenv("WILL_TOPIC", "/energy/status_dbus_mapper")
 VICTRON_TOPIC = os.getenv("VICTRON_TOPIC", "/dbus-mqtt-services")
 DEBUG_LOG_MAPPING = os.getenv("DEBUG_LOG_MAPPING", "False").lower() == "true"
+# Timeout in seconds - stop publishing to Victron if no source messages received
+MESSAGE_TIMEOUT = int(os.getenv("MESSAGE_TIMEOUT", "30"))
 
 
 class P1Mapper:
@@ -42,7 +45,9 @@ class P1Mapper:
     Subscribes to energy meter MQTT messages and publishes them in D-Bus format
     to be consumed by dbus-mqtt-services on VenusOS.
     This can be picked up by the dbus-mqtt-services.py (https://github.com/marcelrv/dbus-mqtt-services) script and published to the Victron D-Bus.
-
+    
+    Automatically suspends publishing to Victron if no messages received from
+    source broker within MESSAGE_TIMEOUT seconds.
     """
 
     def __init__(self):
@@ -50,14 +55,21 @@ class P1Mapper:
         self.logger.info("Starting Victron DBUS MQTT message mapper v%s", __version__)
         self.logger.info("Source MQTT broker: %s", SOURCE_MQTT_BROKER)
         self.logger.info("Victron MQTT broker: %s", VICTRON_BROKER)
+        self.logger.info("Message timeout: %d seconds", MESSAGE_TIMEOUT)
 
         # Connection states
         self.source_connected = False
-        self.victron_connected = False
+        self.victron_mqtt_connected = False  # MQTT connection status
+        self.victron_publishing_active = False  # Publishing status (can be suspended)
         self.processing_lock = threading.Lock()
         
         # Message counter
         self.index = 0
+        
+        # Timeout tracking
+        self.last_message_time = None
+        self.timeout_lock = threading.Lock()
+        self.shutdown_in_progress = False
         
         # Load configuration
         try:
@@ -78,6 +90,9 @@ class P1Mapper:
         # Start MQTT loops
         self.mqtt_client_victron.loop_start()
         self.mqtt_client_source.loop_start()
+        
+        # Start timeout monitor thread
+        self.start_timeout_monitor()
         
         self.logger.info("Mapper initialized and running")
 
@@ -138,6 +153,8 @@ class P1Mapper:
                 f"Dbus mapper online {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 retain=True,
             )
+            # Reset message time on reconnect
+            self.update_last_message_time()
         else:
             self.logger.error(
                 "Source broker connection failed with code %d: %s",
@@ -148,14 +165,16 @@ class P1Mapper:
     def on_connect_victron(self, client, userdata, flags, rc):
         """Callback for Victron broker connection."""
         if rc == 0:
-            self.logger.info("Victron broker connected successfully")
-            self.victron_connected = True
+            self.logger.info("Victron MQTT broker connected successfully")
+            self.victron_mqtt_connected = True
+            # Don't automatically set publishing_active - wait for first message
         else:
             self.logger.error(
                 "Victron broker connection failed with code %d: %s",
                 rc, RC_DESCRIPTIONS.get(rc, "Unknown")
             )
-            self.victron_connected = False
+            self.victron_mqtt_connected = False
+            self.victron_publishing_active = False
 
     def on_disconnect_source(self, client, userdata, rc):
         """Callback for source broker disconnection."""
@@ -168,12 +187,92 @@ class P1Mapper:
 
     def on_disconnect_victron(self, client, userdata, rc):
         """Callback for Victron broker disconnection."""
-        self.victron_connected = False
+        self.victron_mqtt_connected = False
+        self.victron_publishing_active = False
         if rc != 0:
             self.logger.warning(
                 "Unexpected Victron broker disconnection (code %d: %s)",
                 rc, RC_DESCRIPTIONS.get(rc, "Unknown")
             )
+
+    def update_last_message_time(self):
+        """Update the timestamp of the last received message."""
+        with self.timeout_lock:
+            self.last_message_time = time.time()
+
+    def start_timeout_monitor(self):
+        """Start a background thread to monitor message timeout."""
+        def monitor():
+            while not self.shutdown_in_progress:
+                time.sleep(5)  # Check every 5 seconds
+                
+                with self.timeout_lock:
+                    if self.last_message_time is None:
+                        continue
+                    
+                    elapsed = time.time() - self.last_message_time
+                    
+                    # Suspend publishing if timeout exceeded
+                    if elapsed > MESSAGE_TIMEOUT:
+                        if self.victron_publishing_active:
+                            self.logger.warning(
+                                "No messages received for %.1f seconds (timeout: %d). "
+                                "Suspending Victron publishing.",
+                                elapsed, MESSAGE_TIMEOUT
+                            )
+                            self.suspend_victron_publishing()
+        
+        self.timeout_thread = threading.Thread(target=monitor, daemon=True, name="TimeoutMonitor")
+        self.timeout_thread.start()
+        self.logger.info("Timeout monitor thread started")
+
+    def suspend_victron_publishing(self):
+        """Suspend publishing to Victron and send disconnected status."""
+        if self.victron_publishing_active:
+            self.victron_publishing_active = False
+            self.send_disconnected_status()
+            self.logger.info("Victron publishing suspended")
+
+    def resume_victron_publishing(self):
+        """Resume publishing to Victron."""
+        if not self.victron_publishing_active and self.victron_mqtt_connected:
+            self.logger.info("Resuming Victron publishing")
+            self.victron_publishing_active = True
+
+    def send_disconnected_status(self):
+        """Send disconnected status to Victron broker."""
+        if not self.victron_mqtt_connected:
+            return
+            
+        try:
+            disconnect_msg = {
+                **self.device,
+                "dbus_data": [
+                    {
+                        "path": "/Connected",
+                        "value": 0,
+                        "valueType": "integer",
+                        "writeable": False,
+                    },
+                    {
+                        "path": "/UpdateIndex",
+                        "value": self.index % 256,
+                        "valueType": "integer",
+                        "writeable": False,
+                    }
+                ]
+            }
+            result = self.mqtt_client_victron.publish(
+                VICTRON_TOPIC, 
+                json.dumps(disconnect_msg),
+                retain=True
+            )
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self.logger.info("Sent disconnected status to Victron")
+            else:
+                self.logger.warning("Failed to send disconnected status: rc=%d", result.rc)
+        except Exception as e:
+            self.logger.error("Error sending disconnected status: %s", e)
 
     def on_message(self, client, userdata, message):
         """Handle incoming messages from source broker."""
@@ -181,9 +280,20 @@ class P1Mapper:
         
         if message.topic != MQTT_TOPIC:
             return
-            
-        if not self.victron_connected:
-            self.logger.warning("Message skipped: Victron broker not connected")
+        
+        # Update last message time
+        self.update_last_message_time()
+        
+        # Resume publishing if it was suspended
+        if not self.victron_publishing_active:
+            if self.victron_mqtt_connected:
+                self.resume_victron_publishing()
+            else:
+                self.logger.warning("Message received but Victron MQTT not connected")
+                return
+        
+        if not self.victron_mqtt_connected:
+            self.logger.warning("Message skipped: Victron MQTT broker not connected")
             return
         
         # Use lock to prevent concurrent processing
@@ -249,10 +359,10 @@ class P1Mapper:
             
             dbus_data.append(dbus_record)
         
-        # Add connection status
+        # Add connection status (1 if we're actively publishing)
         dbus_data.append({
             "path": "/Connected",
-            "value": 1 if self.source_connected else 0,
+            "value": 1 if self.source_connected and self.victron_publishing_active else 0,
             "valueType": "integer",
             "writeable": False,
         })
@@ -336,10 +446,13 @@ class P1Mapper:
     def shutdown(self):
         """Clean shutdown of MQTT connections."""
         self.logger.info("Shutting down...")
+        self.shutdown_in_progress = True
         
         try:
-            # Publish offline status
+            # Publish offline status to both brokers
             self.mqtt_client_source.publish(WILL_TOPIC, "Dbus mapper offline", retain=True)
+            self.send_disconnected_status()
+            time.sleep(0.2)  # Give time for messages to be sent
         except:
             pass
         
@@ -352,16 +465,16 @@ class P1Mapper:
         self.mqtt_client_source.disconnect()
         
         self.logger.info("Shutdown complete")
-  
+
 
 # MQTT return code descriptions
 RC_DESCRIPTIONS = {
     0: "Success",
-    0: "Normal disconnection",
-    0: "Granted QoS 0",
-    1: "Granted QoS 1",
-    2: "Granted QoS 2",
-    4: "Disconnect with Will Message",
+    1: "Incorrect protocol version",
+    2: "Invalid client identifier",
+    3: "Server unavailable",
+    4: "Bad username or password",
+    5: "Not authorized",
     16: "No matching subscribers",
     17: "No subscription existed",
     24: "Continue authentication",
