@@ -40,6 +40,8 @@ MESSAGE_TIMEOUT = int(os.getenv("MESSAGE_TIMEOUT", "30"))
 # Output format: "dbus" for dbus-mqtt-services, "virtual" for Node-RED virtual devices ({path: value})
 OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "dbus").lower()
 OUTPUT_FORMATS = ("dbus", "virtual")
+# Virtual mode: retained "true"/"false" topic, to be fed to the virtual device as msg.connected
+PRESENCE_TOPIC = os.getenv("PRESENCE_TOPIC", f"{VICTRON_TOPIC}/connected")
 
 
 class P1Mapper:
@@ -65,6 +67,8 @@ class P1Mapper:
                 f"Invalid OUTPUT_FORMAT '{OUTPUT_FORMAT}', must be one of {OUTPUT_FORMATS}"
             )
         self.logger.info("Output format: %s", OUTPUT_FORMAT)
+        if OUTPUT_FORMAT == "virtual":
+            self.logger.info("Presence topic: %s", PRESENCE_TOPIC)
 
         # Connection states
         self.source_connected = False
@@ -85,7 +89,8 @@ class P1Mapper:
             config_path = os.path.join(os.path.dirname(__file__), "mapper.json")
             with open(config_path, encoding="utf-8") as f:
                 dataload = json.load(f)
-            self.device = dataload["device"]
+            # The device header is only used by dbus-mqtt-services
+            self.device = dataload["device"] if OUTPUT_FORMAT == "dbus" else dataload.get("device", {})
             self.mapping: list = dataload["dbus_fields"]
             self.logger.info("Loaded %d field mappings", len(self.mapping))
         except Exception as e:
@@ -145,7 +150,9 @@ class P1Mapper:
                 json.dumps(will_msg),
                 retain=True
             )
-        
+        else:
+            self.mqtt_client_victron.will_set(PRESENCE_TOPIC, "false", retain=True)
+
         try:
             self.mqtt_client_victron.connect_async(VICTRON_BROKER, 1883, keepalive=30)
         except Exception as e:
@@ -248,13 +255,30 @@ class P1Mapper:
         if not self.victron_publishing_active and self.victron_mqtt_connected:
             self.logger.info("Resuming Victron publishing")
             self.victron_publishing_active = True
+            if OUTPUT_FORMAT == "virtual":
+                self.publish_presence(True)
+
+    def publish_presence(self, connected: bool):
+        """Publish retained virtual device presence ("true"/"false")."""
+        try:
+            result = self.mqtt_client_victron.publish(
+                PRESENCE_TOPIC, "true" if connected else "false", retain=True
+            )
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self.logger.info("Sent presence %s to %s", connected, PRESENCE_TOPIC)
+            else:
+                self.logger.warning("Failed to send presence: rc=%d", result.rc)
+        except Exception as e:
+            self.logger.error("Error sending presence: %s", e)
 
     def send_disconnected_status(self):
         """Send disconnected status to Victron broker."""
-        # Virtual devices have no /Connected path; publishing simply stops
-        if not self.victron_mqtt_connected or OUTPUT_FORMAT != "dbus":
+        if not self.victron_mqtt_connected:
             return
-            
+        if OUTPUT_FORMAT == "virtual":
+            self.publish_presence(False)
+            return
+
         try:
             disconnect_msg = {
                 **self.device,

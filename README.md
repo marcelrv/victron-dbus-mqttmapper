@@ -29,6 +29,7 @@ Configure the mapper using environment variables:
 | `WILL_TOPIC` | `/energy/status_dbus_mapper` | MQTT topic for mapper status messages |
 | `MESSAGE_TIMEOUT` | `30` | Timeout in seconds - suspends publishing to Victron if no source messages received |
 | `OUTPUT_FORMAT` | `dbus` | `dbus` for the dbus-mqtt-services plugin, `virtual` for a Node-RED virtual device (see below) |
+| `PRESENCE_TOPIC` | `<VICTRON_TOPIC>/connected` | Virtual mode only: retained `true`/`false` connected status |
 | `LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose logging |
 | `DEBUG_LOG_MAPPING` | `False` | Set to `true` to log detailed field mapping information |
 
@@ -44,7 +45,7 @@ When messages resume, the mapper automatically:
 2. Sends connected status (`/Connected = 1`)
 3. Continues normal operation
 
-With `OUTPUT_FORMAT=virtual` there is no `/Connected` path; the mapper simply stops publishing on timeout and resumes when messages return.
+With `OUTPUT_FORMAT=virtual` the connected status is published as `false`/`true` on the presence topic instead (see below).
 
 ### Node-RED virtual device (no plugin needed)
 
@@ -54,12 +55,28 @@ Venus OS Large includes Node-RED with a *Virtual device* node. Setting `OUTPUT_F
 {"/Ac/Power": 412.0, "/Ac/Energy/Forward": 1234.567, "/Ac/L1/Voltage": 231.0, "/Ac/L1/Current": 1.8}
 ```
 
-`multiplier` and `digits` (rounding) from `mapper.json` are applied. The `device` header is ignored in this mode; name and other device details are set in the Node-RED node.
+`multiplier` and `digits` (rounding) from `mapper.json` are applied. The `device` header is optional in this mode; name and other device details are set in the Node-RED node.
 
-Setup:
+#### Connected status
+
+A virtual device keeps showing its last values when data stops arriving. To take it offline, the Victron node expects `msg.connected = false` (the device is then removed from the GX and VRM until `msg.connected = true` arrives). A message carrying `msg.connected` only changes presence; its payload is ignored.
+
+The mapper therefore publishes a retained `true`/`false` on `PRESENCE_TOPIC`:
+- `true` when publishing starts or resumes
+- `false` after `MESSAGE_TIMEOUT` without source messages, and on shutdown
+- `false` as MQTT last will, so a crashed mapper or lost network connection also takes the meter offline
+
+Requires node-red-contrib-victron 1.7.0 or newer (device presence support).
+
+#### Setup
 1. Run the mapper with `OUTPUT_FORMAT=virtual` and e.g. `VICTRON_TOPIC=/energy/virtual_grid`.
-2. In Node-RED on the Venus device, create a flow: `mqtt in` (broker: the Venus local broker, topic `/energy/virtual_grid`, output: *a parsed JSON object*) → `Virtual device` (device type: *Grid meter*).
-3. Deploy; the grid meter appears in the Venus device list.
+2. In Node-RED on the Venus device, create a flow:
+   - `mqtt in` (broker: the Venus local broker, topic `/energy/virtual_grid`, output: *a parsed JSON object*) → `Virtual device` (device type: *Grid meter*, optionally tick *Start disconnected*)
+   - `mqtt in` (topic `/energy/virtual_grid/connected`) → `function` → the same `Virtual device`, with function:
+     ```javascript
+     return { connected: String(msg.payload) === "true" };
+     ```
+3. Deploy; the grid meter appears in the Venus device list once data flows.
 
 ### Start script using Python
 1. Install dependencies: `pip install paho-mqtt`
