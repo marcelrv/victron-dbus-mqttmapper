@@ -233,7 +233,7 @@ class P1Mapper:
                     if elapsed > MESSAGE_TIMEOUT:
                         if self.victron_publishing_active:
                             self.logger.warning(
-                                "No messages received for %.1f seconds (timeout: %d). "
+                                "No valid readings received for %.1f seconds (timeout: %d). "
                                 "Suspending Victron publishing.",
                                 elapsed, MESSAGE_TIMEOUT
                             )
@@ -315,18 +315,7 @@ class P1Mapper:
         
         if message.topic != MQTT_TOPIC:
             return
-        
-        # Update last message time
-        self.update_last_message_time()
-        
-        # Resume publishing if it was suspended
-        if not self.victron_publishing_active:
-            if self.victron_mqtt_connected:
-                self.resume_victron_publishing()
-            else:
-                self.logger.warning("Message received but Victron MQTT not connected")
-                return
-        
+
         if not self.victron_mqtt_connected:
             self.logger.warning("Message skipped: Victron MQTT broker not connected")
             return
@@ -401,10 +390,16 @@ class P1Mapper:
             
             dbus_data.append(dbus_record)
 
+        if not (virtual_data if OUTPUT_FORMAT == "virtual" else dbus_data):
+            self.logger.debug("No mapped fields in message, nothing to publish")
+            return
+
+        # Only messages with mapped readings count as fresh data: reset the
+        # timeout and resume (sends presence true in virtual mode) here
+        self.update_last_message_time()
+        self.resume_victron_publishing()
+
         if OUTPUT_FORMAT == "virtual":
-            if not virtual_data:
-                self.logger.debug("No mapped fields in message, nothing to publish")
-                return
             response = virtual_data
         else:
             # Add connection status (1 if we're actively publishing)
