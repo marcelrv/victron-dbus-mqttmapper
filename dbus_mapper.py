@@ -13,13 +13,14 @@ from typing import Any, Dict
 import paho.mqtt.client as mqtt
 
 __author__ = ["Marcel Verpaalen"]
-__version__ = "1.3"
+__version__ = "1.4"
 __copyright__ = "Copyright 2023-2026, Marcel Verpaalen"
 __license__ = "GPL 3.0"
 
 #  v1.1  add will message to mqtt broker
 #  v1.2  improved error handling, cross-platform support
 #  v1.3  add timeout to suspend publishing if no source messages
+#  v1.4  add OUTPUT_FORMAT=virtual for Venus OS Node-RED virtual devices
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -36,6 +37,11 @@ VICTRON_TOPIC = os.getenv("VICTRON_TOPIC", "/dbus-mqtt-services")
 DEBUG_LOG_MAPPING = os.getenv("DEBUG_LOG_MAPPING", "False").lower() == "true"
 # Timeout in seconds - stop publishing to Victron if no source messages received
 MESSAGE_TIMEOUT = int(os.getenv("MESSAGE_TIMEOUT", "30"))
+# Output format: "dbus" for dbus-mqtt-services, "virtual" for Node-RED virtual devices ({path: value})
+OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "dbus").lower()
+OUTPUT_FORMATS = ("dbus", "virtual")
+# Virtual mode: retained "true"/"false" topic, to be fed to the virtual device as msg.connected
+PRESENCE_TOPIC = os.getenv("PRESENCE_TOPIC", f"{VICTRON_TOPIC}/connected")
 
 
 class P1Mapper:
@@ -56,6 +62,13 @@ class P1Mapper:
         self.logger.info("Source MQTT broker: %s", SOURCE_MQTT_BROKER)
         self.logger.info("Victron MQTT broker: %s", VICTRON_BROKER)
         self.logger.info("Message timeout: %d seconds", MESSAGE_TIMEOUT)
+        if OUTPUT_FORMAT not in OUTPUT_FORMATS:
+            raise ValueError(
+                f"Invalid OUTPUT_FORMAT '{OUTPUT_FORMAT}', must be one of {OUTPUT_FORMATS}"
+            )
+        self.logger.info("Output format: %s", OUTPUT_FORMAT)
+        if OUTPUT_FORMAT == "virtual":
+            self.logger.info("Presence topic: %s", PRESENCE_TOPIC)
 
         # Connection states
         self.source_connected = False
@@ -76,7 +89,8 @@ class P1Mapper:
             config_path = os.path.join(os.path.dirname(__file__), "mapper.json")
             with open(config_path, encoding="utf-8") as f:
                 dataload = json.load(f)
-            self.device = dataload["device"]
+            # The device header is only used by dbus-mqtt-services
+            self.device = dataload["device"] if OUTPUT_FORMAT == "dbus" else dataload.get("device", {})
             self.mapping: list = dataload["dbus_fields"]
             self.logger.info("Loaded %d field mappings", len(self.mapping))
         except Exception as e:
@@ -118,24 +132,27 @@ class P1Mapper:
         self.mqtt_client_victron.on_connect = self.on_connect_victron
         self.mqtt_client_victron.on_disconnect = self.on_disconnect_victron
         
-        # Set will message with disconnected status
-        will_msg = {
-            **self.device,
-            "dbus_data": [
-                {
-                    "path": "/Connected",
-                    "value": 0,
-                    "valueType": "integer",
-                    "writeable": False,
-                }
-            ]
-        }
-        self.mqtt_client_victron.will_set(
-            VICTRON_TOPIC, 
-            json.dumps(will_msg), 
-            retain=True
-        )
-        
+        # Set will message with disconnected status (dbus-mqtt-services only)
+        if OUTPUT_FORMAT == "dbus":
+            will_msg = {
+                **self.device,
+                "dbus_data": [
+                    {
+                        "path": "/Connected",
+                        "value": 0,
+                        "valueType": "integer",
+                        "writeable": False,
+                    }
+                ]
+            }
+            self.mqtt_client_victron.will_set(
+                VICTRON_TOPIC,
+                json.dumps(will_msg),
+                retain=True
+            )
+        else:
+            self.mqtt_client_victron.will_set(PRESENCE_TOPIC, "false", retain=True)
+
         try:
             self.mqtt_client_victron.connect_async(VICTRON_BROKER, 1883, keepalive=30)
         except Exception as e:
@@ -216,7 +233,7 @@ class P1Mapper:
                     if elapsed > MESSAGE_TIMEOUT:
                         if self.victron_publishing_active:
                             self.logger.warning(
-                                "No messages received for %.1f seconds (timeout: %d). "
+                                "No valid readings received for %.1f seconds (timeout: %d). "
                                 "Suspending Victron publishing.",
                                 elapsed, MESSAGE_TIMEOUT
                             )
@@ -238,12 +255,30 @@ class P1Mapper:
         if not self.victron_publishing_active and self.victron_mqtt_connected:
             self.logger.info("Resuming Victron publishing")
             self.victron_publishing_active = True
+            if OUTPUT_FORMAT == "virtual":
+                self.publish_presence(True)
+
+    def publish_presence(self, connected: bool):
+        """Publish retained virtual device presence ("true"/"false")."""
+        try:
+            result = self.mqtt_client_victron.publish(
+                PRESENCE_TOPIC, "true" if connected else "false", retain=True
+            )
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self.logger.info("Sent presence %s to %s", connected, PRESENCE_TOPIC)
+            else:
+                self.logger.warning("Failed to send presence: rc=%d", result.rc)
+        except Exception as e:
+            self.logger.error("Error sending presence: %s", e)
 
     def send_disconnected_status(self):
         """Send disconnected status to Victron broker."""
         if not self.victron_mqtt_connected:
             return
-            
+        if OUTPUT_FORMAT == "virtual":
+            self.publish_presence(False)
+            return
+
         try:
             disconnect_msg = {
                 **self.device,
@@ -280,18 +315,7 @@ class P1Mapper:
         
         if message.topic != MQTT_TOPIC:
             return
-        
-        # Update last message time
-        self.update_last_message_time()
-        
-        # Resume publishing if it was suspended
-        if not self.victron_publishing_active:
-            if self.victron_mqtt_connected:
-                self.resume_victron_publishing()
-            else:
-                self.logger.warning("Message received but Victron MQTT not connected")
-                return
-        
+
         if not self.victron_mqtt_connected:
             self.logger.warning("Message skipped: Victron MQTT broker not connected")
             return
@@ -323,9 +347,10 @@ class P1Mapper:
             self.logger.error("Invalid JSON in message: %s", e)
             return
         
-        # Build D-Bus data array
+        # Build D-Bus data array (dbus) or {path: value} dict (virtual)
         dbus_data = []
-        
+        virtual_data = {}
+
         for field in self.mapping:
             if "path" not in field or "name" not in field:
                 continue
@@ -342,7 +367,13 @@ class P1Mapper:
             # Apply multiplier if specified
             if "multiplier" in field:
                 value = value * field["multiplier"]
-            
+
+            if OUTPUT_FORMAT == "virtual":
+                if "digits" in field and isinstance(value, (int, float)):
+                    value = round(value, field["digits"])
+                virtual_data[field["path"]] = value
+                continue
+
             # Build D-Bus record
             dbus_record = {
                 "path": field["path"],
@@ -358,28 +389,40 @@ class P1Mapper:
                 dbus_record["digits"] = field["digits"]
             
             dbus_data.append(dbus_record)
-        
-        # Add connection status (1 if we're actively publishing)
-        dbus_data.append({
-            "path": "/Connected",
-            "value": 1 if self.source_connected and self.victron_publishing_active else 0,
-            "valueType": "integer",
-            "writeable": False,
-        })
-        
-        # Add update index
-        dbus_data.append({
-            "path": "/UpdateIndex",
-            "value": self.index % 256,
-            "valueType": "integer",
-            "writeable": False,
-        })
-        
-        # Build complete message
-        response = {
-            **self.device,
-            "dbus_data": dbus_data
-        }
+
+        if not (virtual_data if OUTPUT_FORMAT == "virtual" else dbus_data):
+            self.logger.debug("No mapped fields in message, nothing to publish")
+            return
+
+        # Only messages with mapped readings count as fresh data: reset the
+        # timeout and resume (sends presence true in virtual mode) here
+        self.update_last_message_time()
+        self.resume_victron_publishing()
+
+        if OUTPUT_FORMAT == "virtual":
+            response = virtual_data
+        else:
+            # Add connection status (1 if we're actively publishing)
+            dbus_data.append({
+                "path": "/Connected",
+                "value": 1 if self.source_connected and self.victron_publishing_active else 0,
+                "valueType": "integer",
+                "writeable": False,
+            })
+
+            # Add update index
+            dbus_data.append({
+                "path": "/UpdateIndex",
+                "value": self.index % 256,
+                "valueType": "integer",
+                "writeable": False,
+            })
+
+            # Build complete message
+            response = {
+                **self.device,
+                "dbus_data": dbus_data
+            }
         
         # Publish to Victron broker
         self.publish_to_victron(response)
