@@ -28,6 +28,7 @@ Configure the mapper using environment variables:
 | `VICTRON_TOPIC` | `/dbus-mqtt-services` | MQTT topic to publish Victron-formatted messages to |
 | `WILL_TOPIC` | `/energy/status_dbus_mapper` | MQTT topic for mapper status messages |
 | `MESSAGE_TIMEOUT` | `30` | Timeout in seconds - suspends publishing to Victron if no source messages received |
+| `OUTPUT_FORMAT` | `dbus` | `dbus` for the dbus-mqtt-services plugin, `virtual` for a Node-RED virtual device (see below) |
 | `LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose logging |
 | `DEBUG_LOG_MAPPING` | `False` | Set to `true` to log detailed field mapping information |
 
@@ -42,6 +43,23 @@ When messages resume, the mapper automatically:
 1. Resumes publishing to the Victron broker
 2. Sends connected status (`/Connected = 1`)
 3. Continues normal operation
+
+With `OUTPUT_FORMAT=virtual` there is no `/Connected` path; the mapper simply stops publishing on timeout and resumes when messages return.
+
+### Node-RED virtual device (no plugin needed)
+
+Venus OS Large includes Node-RED with a *Virtual device* node. Setting `OUTPUT_FORMAT=virtual` makes the mapper publish a flat `{path: value}` object that this node accepts directly, so the dbus-mqtt-services plugin is no longer needed:
+
+```json
+{"/Ac/Power": 412.0, "/Ac/Energy/Forward": 1234.567, "/Ac/L1/Voltage": 231.0, "/Ac/L1/Current": 1.8}
+```
+
+`multiplier` and `digits` (rounding) from `mapper.json` are applied. The `device` header is ignored in this mode; name and other device details are set in the Node-RED node.
+
+Setup:
+1. Run the mapper with `OUTPUT_FORMAT=virtual` and e.g. `VICTRON_TOPIC=/energy/virtual_grid`.
+2. In Node-RED on the Venus device, create a flow: `mqtt in` (broker: the Venus local broker, topic `/energy/virtual_grid`, output: *a parsed JSON object*) → `Virtual device` (device type: *Grid meter*).
+3. Deploy; the grid meter appears in the Venus device list.
 
 ### Start script using Python
 1. Install dependencies: `pip install paho-mqtt`

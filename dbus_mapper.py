@@ -13,13 +13,14 @@ from typing import Any, Dict
 import paho.mqtt.client as mqtt
 
 __author__ = ["Marcel Verpaalen"]
-__version__ = "1.3"
+__version__ = "1.4"
 __copyright__ = "Copyright 2023-2026, Marcel Verpaalen"
 __license__ = "GPL 3.0"
 
 #  v1.1  add will message to mqtt broker
 #  v1.2  improved error handling, cross-platform support
 #  v1.3  add timeout to suspend publishing if no source messages
+#  v1.4  add OUTPUT_FORMAT=virtual for Venus OS Node-RED virtual devices
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -36,6 +37,9 @@ VICTRON_TOPIC = os.getenv("VICTRON_TOPIC", "/dbus-mqtt-services")
 DEBUG_LOG_MAPPING = os.getenv("DEBUG_LOG_MAPPING", "False").lower() == "true"
 # Timeout in seconds - stop publishing to Victron if no source messages received
 MESSAGE_TIMEOUT = int(os.getenv("MESSAGE_TIMEOUT", "30"))
+# Output format: "dbus" for dbus-mqtt-services, "virtual" for Node-RED virtual devices ({path: value})
+OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "dbus").lower()
+OUTPUT_FORMATS = ("dbus", "virtual")
 
 
 class P1Mapper:
@@ -56,6 +60,11 @@ class P1Mapper:
         self.logger.info("Source MQTT broker: %s", SOURCE_MQTT_BROKER)
         self.logger.info("Victron MQTT broker: %s", VICTRON_BROKER)
         self.logger.info("Message timeout: %d seconds", MESSAGE_TIMEOUT)
+        if OUTPUT_FORMAT not in OUTPUT_FORMATS:
+            raise ValueError(
+                f"Invalid OUTPUT_FORMAT '{OUTPUT_FORMAT}', must be one of {OUTPUT_FORMATS}"
+            )
+        self.logger.info("Output format: %s", OUTPUT_FORMAT)
 
         # Connection states
         self.source_connected = False
@@ -118,23 +127,24 @@ class P1Mapper:
         self.mqtt_client_victron.on_connect = self.on_connect_victron
         self.mqtt_client_victron.on_disconnect = self.on_disconnect_victron
         
-        # Set will message with disconnected status
-        will_msg = {
-            **self.device,
-            "dbus_data": [
-                {
-                    "path": "/Connected",
-                    "value": 0,
-                    "valueType": "integer",
-                    "writeable": False,
-                }
-            ]
-        }
-        self.mqtt_client_victron.will_set(
-            VICTRON_TOPIC, 
-            json.dumps(will_msg), 
-            retain=True
-        )
+        # Set will message with disconnected status (dbus-mqtt-services only)
+        if OUTPUT_FORMAT == "dbus":
+            will_msg = {
+                **self.device,
+                "dbus_data": [
+                    {
+                        "path": "/Connected",
+                        "value": 0,
+                        "valueType": "integer",
+                        "writeable": False,
+                    }
+                ]
+            }
+            self.mqtt_client_victron.will_set(
+                VICTRON_TOPIC,
+                json.dumps(will_msg),
+                retain=True
+            )
         
         try:
             self.mqtt_client_victron.connect_async(VICTRON_BROKER, 1883, keepalive=30)
@@ -241,7 +251,8 @@ class P1Mapper:
 
     def send_disconnected_status(self):
         """Send disconnected status to Victron broker."""
-        if not self.victron_mqtt_connected:
+        # Virtual devices have no /Connected path; publishing simply stops
+        if not self.victron_mqtt_connected or OUTPUT_FORMAT != "dbus":
             return
             
         try:
@@ -323,9 +334,10 @@ class P1Mapper:
             self.logger.error("Invalid JSON in message: %s", e)
             return
         
-        # Build D-Bus data array
+        # Build D-Bus data array (dbus) or {path: value} dict (virtual)
         dbus_data = []
-        
+        virtual_data = {}
+
         for field in self.mapping:
             if "path" not in field or "name" not in field:
                 continue
@@ -342,7 +354,13 @@ class P1Mapper:
             # Apply multiplier if specified
             if "multiplier" in field:
                 value = value * field["multiplier"]
-            
+
+            if OUTPUT_FORMAT == "virtual":
+                if "digits" in field and isinstance(value, (int, float)):
+                    value = round(value, field["digits"])
+                virtual_data[field["path"]] = value
+                continue
+
             # Build D-Bus record
             dbus_record = {
                 "path": field["path"],
@@ -358,28 +376,34 @@ class P1Mapper:
                 dbus_record["digits"] = field["digits"]
             
             dbus_data.append(dbus_record)
-        
-        # Add connection status (1 if we're actively publishing)
-        dbus_data.append({
-            "path": "/Connected",
-            "value": 1 if self.source_connected and self.victron_publishing_active else 0,
-            "valueType": "integer",
-            "writeable": False,
-        })
-        
-        # Add update index
-        dbus_data.append({
-            "path": "/UpdateIndex",
-            "value": self.index % 256,
-            "valueType": "integer",
-            "writeable": False,
-        })
-        
-        # Build complete message
-        response = {
-            **self.device,
-            "dbus_data": dbus_data
-        }
+
+        if OUTPUT_FORMAT == "virtual":
+            if not virtual_data:
+                self.logger.debug("No mapped fields in message, nothing to publish")
+                return
+            response = virtual_data
+        else:
+            # Add connection status (1 if we're actively publishing)
+            dbus_data.append({
+                "path": "/Connected",
+                "value": 1 if self.source_connected and self.victron_publishing_active else 0,
+                "valueType": "integer",
+                "writeable": False,
+            })
+
+            # Add update index
+            dbus_data.append({
+                "path": "/UpdateIndex",
+                "value": self.index % 256,
+                "valueType": "integer",
+                "writeable": False,
+            })
+
+            # Build complete message
+            response = {
+                **self.device,
+                "dbus_data": dbus_data
+            }
         
         # Publish to Victron broker
         self.publish_to_victron(response)
