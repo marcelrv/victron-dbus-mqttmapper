@@ -254,22 +254,28 @@ class P1Mapper:
         """Resume publishing to Victron."""
         if not self.victron_publishing_active and self.victron_mqtt_connected:
             self.logger.info("Resuming Victron publishing")
+            # In virtual mode only become active once presence "true" is sent,
+            # otherwise the retained "false" would stick; the next message retries
+            if OUTPUT_FORMAT == "virtual" and not self.publish_presence(True):
+                return
             self.victron_publishing_active = True
-            if OUTPUT_FORMAT == "virtual":
-                self.publish_presence(True)
 
-    def publish_presence(self, connected: bool):
-        """Publish retained virtual device presence ("true"/"false")."""
+    def publish_presence(self, connected: bool) -> bool:
+        """Publish retained virtual device presence ("true"/"false").
+
+        Returns True if the publish was accepted by the client.
+        """
         try:
             result = self.mqtt_client_victron.publish(
                 PRESENCE_TOPIC, "true" if connected else "false", retain=True
             )
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 self.logger.info("Sent presence %s to %s", connected, PRESENCE_TOPIC)
-            else:
-                self.logger.warning("Failed to send presence: rc=%d", result.rc)
+                return True
+            self.logger.warning("Failed to send presence: rc=%d", result.rc)
         except Exception as e:
             self.logger.error("Error sending presence: %s", e)
+        return False
 
     def send_disconnected_status(self):
         """Send disconnected status to Victron broker."""
