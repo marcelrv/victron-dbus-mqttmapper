@@ -250,15 +250,16 @@ class P1Mapper:
             self.send_disconnected_status()
             self.logger.info("Victron publishing suspended")
 
-    def resume_victron_publishing(self):
-        """Resume publishing to Victron."""
+    def resume_victron_publishing(self) -> bool:
+        """Resume publishing to Victron. Returns True if publishing is active."""
         if not self.victron_publishing_active and self.victron_mqtt_connected:
             self.logger.info("Resuming Victron publishing")
             # In virtual mode only become active once presence "true" is sent,
             # otherwise the retained "false" would stick; the next message retries
             if OUTPUT_FORMAT == "virtual" and not self.publish_presence(True):
-                return
+                return False
             self.victron_publishing_active = True
+        return self.victron_publishing_active
 
     def publish_presence(self, connected: bool) -> bool:
         """Publish retained virtual device presence ("true"/"false").
@@ -403,7 +404,9 @@ class P1Mapper:
         # Only messages with mapped readings count as fresh data: reset the
         # timeout and resume (sends presence true in virtual mode) here
         self.update_last_message_time()
-        self.resume_victron_publishing()
+        if not self.resume_victron_publishing():
+            self.logger.warning("Publishing not active, skipping message")
+            return
 
         if OUTPUT_FORMAT == "virtual":
             response = virtual_data
